@@ -2,6 +2,8 @@ import asyncio
 from bleak import BleakClient
 import time
 
+#testtesttes
+
 DEVICE_ADDRESS   = "90:70:69:11:EA:55"
 CONTROL_CHAR_UUID = "00001234-0000-1000-8000-00805f9b34fb"
 STATUS_CHAR_UUID  = "00001235-0000-1000-8000-00805f9b34fb"
