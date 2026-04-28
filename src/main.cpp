@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include "NimBLEDevice.h"
-
-#define DATASIZE 200000
-uint8_t * randomData = NULL;
+#include "esp_camera.h"
 
 #pragma region BLE
 
@@ -15,6 +13,7 @@ uint8_t * randomData = NULL;
 #define BUFFERSIZE 396
  
 uint8_t packet[BUFFERSIZE]; //TODO: implement this as buffer
+
 NimBLEServer    *pServer;
 NimBLEService   *pService;
 NimBLECharacteristic *pControl;
@@ -101,7 +100,7 @@ void sendImage(uint8_t* image, uint size ){
         pData->setValue(message, msgsize + 2 );
         pData->notify();
         
-        delay(15); //10 ms works with my windows pc w/ intel AX200, receiving using python
+        delay(20); //10 ms works with my windows pc w/ intel AX200, receiving using python
     }
 
     if (currentChunk == totalChunks){
@@ -116,13 +115,51 @@ void sendImage(uint8_t* image, uint size ){
 
 #pragma endregion BLE
 
+#pragma region CAMERA
+
+static camera_config_t camera_config = {
+        .pin_pwdn       = -1,
+        .pin_reset      = -1,
+        .pin_xclk       = 10,
+        .pin_sccb_sda   = 40,
+        .pin_sccb_scl   = 39,
+        .pin_d7         = 48,
+        .pin_d6         = 11,
+        .pin_d5         = 12,
+        .pin_d4         = 14,
+        .pin_d3         = 16,
+        .pin_d2         = 18,
+        .pin_d1         = 17,
+        .pin_d0         = 15,
+        .pin_vsync      = 38,
+        .pin_href       = 47,
+        .pin_pclk       = 13,
+
+        .xclk_freq_hz   = 20000000,
+        .ledc_timer     = LEDC_TIMER_0,
+        .ledc_channel   = LEDC_CHANNEL_0,
+        .pixel_format   = PIXFORMAT_JPEG,
+        .frame_size     = FRAMESIZE_SXGA,
+        .jpeg_quality   = 4,
+        .fb_count       = 1,
+        .fb_location    = CAMERA_FB_IN_PSRAM,
+        .grab_mode      = CAMERA_GRAB_WHEN_EMPTY
+    };
+
+
+
+bool took_picture=false;
+camera_fb_t * framebuffer;
+
+#pragma endregion CAMERA
+
 #pragma region MAIN
 
-bool malloc_work=false;
 void setup() {
     //BLE Setup
     Serial.begin(115200);
     delay(100);
+
     Serial.print("Initializing nimBLE....");
     NimBLEDevice::init("NimBLE");
     NimBLEDevice::setMTU(MTU_RATE);
@@ -149,24 +186,31 @@ void setup() {
     pAdvertising->start();
 
     Serial.println("DONE");
-
-    randomData = (uint8_t *) ps_malloc(DATASIZE);
-    if(randomData!=NULL){
-        malloc_work = true;    
-        for(int i = 0; i < DATASIZE; i++){
-            //randomData[i] = 'A';// + rand()%( 'Z' - 'A' );
-            randomData[i] = '0' + i%10;
-        }
+    
+    
+    Serial.println("Initializing Camera");
+    if(esp_camera_init( &camera_config) != ESP_OK){ // this works so far
+        while(1)
+            Serial.println("Camera init error!");
     }
-
+    delay(5000);
+    Serial.println("taking picture");
+    framebuffer = esp_camera_fb_get();
+    
+    if(!framebuffer){
+        while(1)
+            Serial.println("couldnt take picture!");
+            delay(100);
+    } else {
+        took_picture = true;
+    }
 
 }
 
 void loop(){
-    if(malloc_work){
+    if(took_picture){
         if(client_connected && data_request && !done){
-            sendImage(randomData, DATASIZE);
-            //Serial.println("sent image");
+            sendImage(framebuffer->buf, framebuffer->len);
             done = true;
         }
     } else {
