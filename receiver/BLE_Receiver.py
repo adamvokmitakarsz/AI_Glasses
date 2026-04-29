@@ -62,7 +62,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         end = time.time()
         print("Stopped from keyboard...")
-        with open ("file.txt", "wb") as file:
+        with open ("file.jpg", "wb") as file:
             file.write(result)
         print(f"received {len(result)} bytes")
         print(f"program ran for {end - start} seconds")
