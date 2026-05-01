@@ -46,7 +46,7 @@ async def main():
     start = time.time()
     
     
-    async with BleakClient("90:70:69:11:EA:55") as client:
+    async with BleakClient("90:70:69:11:EA:55", timeout=60) as client:
         print("Connected!")
         
         await client.start_notify(STATUS_CHAR_UUID, status_handler)
@@ -56,6 +56,7 @@ async def main():
         print("Written!")
 
         await asyncio.Event().wait()
+        
 if __name__ == "__main__":
     try:
         asyncio.run(main())
