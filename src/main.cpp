@@ -2,17 +2,23 @@
 #include "NimBLEDevice.h"
 #include "esp_camera.h"
 
+
 #pragma region BLE
 
 //Variables and data for BLE communication 
-#define SERVICE_UUID    "0000abcd-0000-1000-8000-00805f9b34fb"
-#define CONTROL_UUID    "00001234-0000-1000-8000-00805f9b34fb"
-#define STATUS_UUID     "00001235-0000-1000-8000-00805f9b34fb"
-#define DATA_UUID       "00001236-0000-1000-8000-00805f9b34fb"
+#define IMG_SERVICE_UUID    "0000abcd-0000-1000-8000-00805f9b34fb"
+#define IMG_CONTROL_UUID    "00001234-0000-1000-8000-00805f9b34fb"
+#define IMG_STATUS_UUID     "00001235-0000-1000-8000-00805f9b34fb"
+#define IMG_DATA_UUID       "00001236-0000-1000-8000-00805f9b34fb"
+
+#define CMD_SERVICE_UUID    "6d22fa7b-4f6c-4bd7-962c-a343c00060a1"
+#define CMD_CMD_UUID        "06e025b3-597e-4c94-87df-c4bd1b4e0b0e"
+#define CMD_BAT_UUID        "726530db-8845-4241-a10e-e26f20b095d6"
+
 #define MTU_RATE 512
 #define BUFFERSIZE 396
  
-uint8_t packet[BUFFERSIZE + 2]; //TODO: implement this as buffer
+uint8_t packet[BUFFERSIZE + 2]; //global, to make memory usage more obvious, might not make sense
 
 NimBLEServer    *pServer;
 NimBLEService   *pImgService;
@@ -20,16 +26,20 @@ NimBLECharacteristic *pImgControl;
 NimBLECharacteristic *pImgStatus;
 NimBLECharacteristic *pImgData;
 
+NimBLEService   *pCmdService;
+NimBLECharacteristic *pCmdChar;
+NimBLECharacteristic *pBatChar;
+
+
 bool client_connected = false;
 bool data_request = false;
 
-
-bool done = 0;
+bool done = 0;  ///remove later
 //BLE Callbacks
-class ControlCallbacks : public NimBLECharacteristicCallbacks {
+class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
         NimBLEAttValue val = pCharacteristic->getValue();
-        Serial.print("Write from: ");
+        Serial.print("Write to ImgControl from: ");
         Serial.println(connInfo.getAddress().toString().c_str());
         Serial.print("Data is:");
         Serial.write(val.data(), val.length());
@@ -41,6 +51,18 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
         } else {
             data_request = false;
         }
+    }
+};
+
+class CmdCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override{
+        NimBLEAttValue val = pCharacteristic->getValue();
+        Serial.print("Write to CMD from: ");
+        Serial.println(connInfo.getAddress().toString().c_str());
+        Serial.print("Data is:");
+        Serial.write(val.data(), val.length());
+        Serial.println();        
+        //TODO: implement control from phone here
     }
 };
 
@@ -109,11 +131,12 @@ void sendImage(uint8_t* image, uint size ){
     pImgStatus->setValue('E');
     pImgStatus->notify();
 
-    delay(100);
+    delay(150); // seems like the last chunk keeps goig missing, so i added a longer delay here 
 
 }
 
 #pragma endregion BLE
+
 
 #pragma region CAMERA
 
@@ -146,18 +169,24 @@ static camera_config_t camera_config = {
         .grab_mode      = CAMERA_GRAB_LATEST
     };
 
-
-
 bool took_picture=false;
 camera_fb_t * framebuffer;
 
 #pragma endregion CAMERA
 
+
+#pragma region SD
+
+RTC_DATA_ATTR uint16_t img_counter;
+
+#pragma endregion SD
+
+
 #pragma region MAIN
 #define BLE_TIMEOUT (25) //in s
 #define TIME_TO_SLEEP (60)   // in s
 
-inline unsigned long toMicros(unsigned long sec){
+inline unsigned long toMicros(unsigned long sec){ 
     return sec * 1000000UL;
 }
 
@@ -180,20 +209,26 @@ void setup() {
     Serial.begin(115200);
     delay(100);
 
+    ///BLE setup:
     Serial.print("Initializing nimBLE....");
     NimBLEDevice::init("AIGLS");
     NimBLEDevice::setMTU(MTU_RATE);
     pServer = NimBLEDevice::createServer(); //create server
-    pImgService = pServer->createService(SERVICE_UUID); //create service
+    pImgService = pServer->createService(IMG_SERVICE_UUID); //create image service
+    pCmdService = pServer->createService(CMD_SERVICE_UUID); //create control + battery service
     
-    pImgControl = pImgService->createCharacteristic(CONTROL_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR); //command characteristic
-    pImgStatus  = pImgService->createCharacteristic(STATUS_UUID, NIMBLE_PROPERTY::NOTIFY); //status characteristic
-    pImgData    = pImgService->createCharacteristic(DATA_UUID, NIMBLE_PROPERTY::NOTIFY);  //data characteristic
+    pImgControl = pImgService->createCharacteristic(IMG_CONTROL_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR); //command characteristic
+    pImgStatus  = pImgService->createCharacteristic(IMG_STATUS_UUID, NIMBLE_PROPERTY::NOTIFY); //status characteristic
+    pImgData    = pImgService->createCharacteristic(IMG_DATA_UUID, NIMBLE_PROPERTY::NOTIFY);  //data characteristic
     
-    pServer->setCallbacks(new ServerCallbacks);
-    pImgControl->setCallbacks(new ControlCallbacks);
+    pCmdChar    = pCmdService->createCharacteristic(CMD_CMD_UUID, NIMBLE_PROPERTY::WRITE );
+    pBatChar    = pCmdService->createCharacteristic(CMD_BAT_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY );
 
-    
+
+    pServer->setCallbacks(new ServerCallbacks);
+    pImgControl->setCallbacks(new ImgControlCallbacks);
+    pCmdChar->setCallbacks(new CmdCallbacks);
+
     pServer->start();
 
     pImgControl->setValue("Hello BLE");
@@ -201,12 +236,13 @@ void setup() {
     pImgData->setValue(0);
     
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(SERVICE_UUID); // advertise the UUID of our service
+    pAdvertising->addServiceUUID(IMG_SERVICE_UUID); // advertise the UUID of our service
     pAdvertising->setName("AIGLS"); // advertise the device name
     pAdvertising->start();
 
     Serial.println("DONE");
     
+    ///Camera setup:
     
     Serial.println("Initializing Camera");
     if(esp_camera_init( &camera_config) != ESP_OK){ // this works so far
@@ -214,8 +250,8 @@ void setup() {
     }
     delay(5000);
     
-
-    //pinMode(LED_BUILTIN, OUTPUT);
+    
+    
     
 }
 
@@ -249,8 +285,9 @@ void loop(){
             break;
         }
         case(SEND_FROM_SD):{
-            //TODO: implement this
-
+            //TODO: implement sending from sd here
+            
+            state = SEND_IMAGE; //send latest image once previous ones were sent
             break;
         }
         case(SEND_IMAGE):{
