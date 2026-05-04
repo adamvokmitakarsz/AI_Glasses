@@ -17,6 +17,8 @@
 
 #define MTU_RATE 512
 #define BUFFERSIZE 396
+
+#define ALLOWED_ATTEMPTS (3)
  
 uint8_t packet[BUFFERSIZE + 2]; //global, to make memory usage more obvious, might not make sense
 
@@ -88,7 +90,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 };
 
-void sendImage(uint8_t* image, uint size ){
+bool sendImage(uint8_t* image, uint size ){
     uint8_t status[8];
     //uint8_t message[BUFFERSIZE + 2];
     uint16_t totalChunks = (size + BUFFERSIZE - 1) / BUFFERSIZE;
@@ -133,6 +135,7 @@ void sendImage(uint8_t* image, uint size ){
 
     delay(150); // seems like the last chunk keeps goig missing, so i added a longer delay here 
 
+    return currentChunk == totalChunks;
 }
 
 #pragma endregion BLE
@@ -163,7 +166,7 @@ static camera_config_t camera_config = {
         .ledc_channel   = LEDC_CHANNEL_0,
         .pixel_format   = PIXFORMAT_JPEG,
         .frame_size     = FRAMESIZE_XGA,
-        .jpeg_quality   = 8,
+        .jpeg_quality   = 5,
         .fb_count       = 2,
         .fb_location    = CAMERA_FB_IN_PSRAM,
         .grab_mode      = CAMERA_GRAB_LATEST
@@ -171,6 +174,7 @@ static camera_config_t camera_config = {
 
 bool took_picture=false;
 camera_fb_t * framebuffer;
+
 
 #pragma endregion CAMERA
 
@@ -192,19 +196,19 @@ inline unsigned long toMicros(unsigned long sec){
 
 unsigned long start_time;
 
-enum State{
+enum ImgState{
     TAKE_PICTURE,
     WAIT_FOR_CONNECTION,
     SEND_FROM_SD,
     SEND_IMAGE,
     SAVE_TO_SD,
     GO_SLEEP
-} state;
+} img_state;
 
 
 void setup() {
     start_time = micros();
-    state = TAKE_PICTURE;
+    img_state = TAKE_PICTURE;
     //BLE Setup
     Serial.begin(115200);
     delay(100);
@@ -215,11 +219,12 @@ void setup() {
     NimBLEDevice::setMTU(MTU_RATE);
     pServer = NimBLEDevice::createServer(); //create server
     pImgService = pServer->createService(IMG_SERVICE_UUID); //create image service
-    pCmdService = pServer->createService(CMD_SERVICE_UUID); //create control + battery service
     
     pImgControl = pImgService->createCharacteristic(IMG_CONTROL_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR); //command characteristic
     pImgStatus  = pImgService->createCharacteristic(IMG_STATUS_UUID, NIMBLE_PROPERTY::NOTIFY); //status characteristic
     pImgData    = pImgService->createCharacteristic(IMG_DATA_UUID, NIMBLE_PROPERTY::NOTIFY);  //data characteristic
+    
+    pCmdService = pServer->createService(CMD_SERVICE_UUID); //create control + battery service
     
     pCmdChar    = pCmdService->createCharacteristic(CMD_CMD_UUID, NIMBLE_PROPERTY::WRITE );
     pBatChar    = pCmdService->createCharacteristic(CMD_BAT_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY );
@@ -257,55 +262,72 @@ void setup() {
 
 void loop(){
 
-    switch(state){
+    static int capture_attempts = 0;
+    static int send_attempts = 0;
+    switch(img_state){
         case(TAKE_PICTURE) : {
             //digitalWrite(LED_BUILTIN, HIGH);
             Serial.println("taking picture");
             framebuffer = esp_camera_fb_get();
             
+            capture_attempts++;
+            
             if(!framebuffer){
-                Serial.println("couldnt take picture!");
-                took_picture = false;
+                Serial.print("couldnt take picture, attempt: ");
+                Serial.println(capture_attempts);
+                img_state = TAKE_PICTURE;
             } else {
-                took_picture = true;
+                capture_attempts = 0;
+                img_state = WAIT_FOR_CONNECTION; 
             }
-            state = WAIT_FOR_CONNECTION; 
+            
             break;
         }
         case(WAIT_FOR_CONNECTION):{
             if(micros() - start_time < toMicros(BLE_TIMEOUT) ){
                 if(client_connected) {
-                    state = SEND_IMAGE;
+                    img_state = SEND_FROM_SD;
                 }
             } else { //TODO: add logic for SEND_FROM_SD here
                 Serial.println("BLE Connection Timed out...");
-                state = SAVE_TO_SD;
+                img_state = SAVE_TO_SD;
             }
             
             break;
         }
         case(SEND_FROM_SD):{
             //TODO: implement sending from sd here
+            Serial.println("Sending from SD");
             
-            state = SEND_IMAGE; //send latest image once previous ones were sent
+            img_state = SEND_IMAGE; //send latest image once previous ones were sent
             break;
         }
         case(SEND_IMAGE):{
-            if(!took_picture) 
-                break;
-            //Serial.println("Sending image");
+            bool sent_image = false;
+        
             if(data_request){
-                sendImage(framebuffer->buf, framebuffer->len);
-                //delay(5000);
-                state = GO_SLEEP;
+                sent_image = sendImage(framebuffer->buf, framebuffer->len);
+                send_attempts++;
+                if(sent_image) {
+                    img_state = GO_SLEEP;
+                    send_attempts = 0;
+                    break; //breaks switch
+                }
+                if(send_attempts < ALLOWED_ATTEMPTS){
+                    img_state = WAIT_FOR_CONNECTION;
+                    break; //breaks switch
+                } else {
+                    img_state = SAVE_TO_SD;
+                    break; //breaks switch
+                }
             }
                 
             break;
         }
         case(SAVE_TO_SD):{
             Serial.println("Saving to SD Card");
-            //implement saving here
-            state = GO_SLEEP;
+            //TODO: implement saving here
+            img_state = GO_SLEEP;
             break;
         }
         case(GO_SLEEP):{
@@ -314,15 +336,16 @@ void loop(){
             delay(50);
 
             //digitalWrite(LED_BUILTIN, LOW);
-            if( ( micros() - start_time ) < toMicros(TIME_TO_SLEEP) ) { // go to sleep for a non-negative amount of time
-                uint64_t timeToSleep = toMicros(TIME_TO_SLEEP) - ( micros() - start_time );
+            unsigned long now = micros();
+            if( ( now - start_time ) < toMicros(TIME_TO_SLEEP) ) { // go to sleep for a non-negative amount of time
+                uint64_t timeToSleep = toMicros(TIME_TO_SLEEP) - ( now - start_time );
 
                 esp_camera_deinit();
                 esp_sleep_enable_timer_wakeup(timeToSleep);
                 esp_deep_sleep_start();
 
             } else { // if too much time has passed, start from beginning again.
-                state = TAKE_PICTURE;
+                img_state = TAKE_PICTURE;
                 start_time = micros();
             }
             break;

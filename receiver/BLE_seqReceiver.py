@@ -83,7 +83,7 @@ def save_image():
 
 async def find_device():
     while True:
-        print("Scanning for AI_GLASSES...")
+        print(f"Scanning for {TARGET_NAME}...")
         devices = await BleakScanner.discover(timeout=3.0)
 
         for d in devices:
