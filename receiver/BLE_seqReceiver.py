@@ -8,13 +8,15 @@ DATA_UUID    = "00001236-0000-1000-8000-00805f9b34fb"
 
 TARGET_NAME = "AIGLS"
 
-image_counter = 0
+image_counter = 1
+#current_index = 1
 
 # Image state
 expected_chunks = 0
 received_chunks = {}
 image_size = 0
 
+receiving = False
 
 def reset_state():
     global expected_chunks, received_chunks, image_size
@@ -23,26 +25,52 @@ def reset_state():
     image_size = 0
 
 
-def handle_status(_, data: bytearray):
-    global expected_chunks, image_size
+def handle_status(_, data):
+    global image_counter
+    global expected_chunks
+    global receiving
 
     if not data:
         return
 
-    if data[0] == ord('S'):
+    msg_type = chr(data[0])
+
+    if msg_type == 'S':
+        index = int.from_bytes(data[1:5], 'big')
+        size = int.from_bytes(data[5:9], 'big')
+        chunks = int.from_bytes(data[9:11], 'big')
+
+        print(f"Receiving image {index}")
         reset_state()
+        expected_chunks = chunks
+        receiving = True
+        return
 
-        image_size = int.from_bytes(data[1:5], 'big')
-        expected_chunks = int.from_bytes(data[5:7], 'big')
-
-        print(f"[STATUS] Start image: {image_size} bytes, {expected_chunks} chunks")
-
-    elif data[0] == ord('E'):
-        print("[STATUS] End of image")
+    elif msg_type == 'E':
         save_image()
+        image_counter += 1
+
+
+    elif msg_type == 'N':
+        index = int.from_bytes(data[1:5], 'big')
+        print(f"Image {index} not ready yet")
+        # retry same index later
+
+    elif msg_type == 'X':
+        index = int.from_bytes(data[1:5], 'big')
+        print(f"Error on image {index}, err: {data[5]}")
+        image_counter += 1
+
+
+    if msg_type != 'S':
+        receiving = False
+        
+        # await client.write_gatt_char(CONTROL_UUID, msg)
+
 
 
 def handle_data(_, data: bytearray):
+    global received_chunks, expected_chunks
     if len(data) < 2:
         return
 
@@ -51,6 +79,12 @@ def handle_data(_, data: bytearray):
 
     if expected_chunks > 0 and len(received_chunks) % 50 == 0:
         print(f"Received {len(received_chunks)}/{expected_chunks}")
+
+async def request_image(client):
+    global image_counter
+    msg = b'R' + image_counter.to_bytes(4, 'big')
+    await client.write_gatt_char(CONTROL_UUID, msg)
+    print(f"Requested image {image_counter}")
 
 
 def save_image():
@@ -77,7 +111,7 @@ def save_image():
 
     print(f"Saved {filename}")
 
-    image_counter += 1
+    
     reset_state()
 
 
@@ -108,11 +142,13 @@ async def connect_and_receive():
                 # Give ESP a moment after connection
                 await asyncio.sleep(1)
 
-                print("Requesting image...")
-                await client.write_gatt_char(CONTROL_UUID, b'R')
+                # print("Requesting image...")
+                # await client.write_gatt_char(CONTROL_UUID, b'R')
 
                 # Stay connected until ESP disconnects (sleep)
                 while client.is_connected:
+                    if(not receiving):
+                        await request_image(client)
                     await asyncio.sleep(1)
 
                 print("Disconnected (likely ESP sleep)")

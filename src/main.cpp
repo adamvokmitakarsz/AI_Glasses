@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include "NimBLEDevice.h"
 #include "esp_camera.h"
+#include <SPI.h>
+#include <SD.h>
+
 
 
 #pragma region BLE
@@ -36,6 +39,10 @@ NimBLECharacteristic *pBatChar;
 bool client_connected = false;
 bool data_request = false;
 
+RTC_DATA_ATTR uint32_t latest_index = 0;
+uint32_t requested_image_index = 0;
+
+
 bool done = 0;  ///remove later
 //BLE Callbacks
 class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
@@ -47,9 +54,18 @@ class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
         Serial.write(val.data(), val.length());
         Serial.println();
 
-        if (pCharacteristic->getValue().c_str()[0] == 'R'){
+        if (val.length() >= 5 && val.data()[0] == 'R') {
+            uint32_t requestedIndex =
+                (val.data()[1] << 24) |
+                (val.data()[2] << 16) |
+                (val.data()[3] << 8)  |
+                (val.data()[4]);
+
+            Serial.printf("Requested index: %lu\n", requestedIndex);
+
+            requested_image_index = requestedIndex;
             data_request = true;
-            done = 0;
+            done = false;
         } else {
             data_request = false;
         }
@@ -90,22 +106,30 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 };
 
-bool sendImage(uint8_t* image, uint size ){
-    uint8_t status[8];
+bool sendImage(uint8_t* image, uint size , uint index){
+    uint8_t status[12];
     //uint8_t message[BUFFERSIZE + 2];
     uint16_t totalChunks = (size + BUFFERSIZE - 1) / BUFFERSIZE;
-    Serial.println("sending status message");
+    Serial.print("Sending #");
+    Serial.println(index);
     status[0] = 'S';
-    status[1] = (size >> 24) & 0xFF;
-    status[2] = (size >> 16) & 0xFF;
-    status[3] = (size >> 8) & 0xFF;
-    status[4] = (size) & 0xFF;
+    
+    //image index:
+    status[1] = (index >> 24) & 0xFF;
+    status[2] = (index >> 16) & 0xFF;
+    status[3] = (index >> 8) & 0xFF;
+    status[4] = index & 0xFF;
+    //image size:
+    status[5] = (size >> 24) & 0xFF;
+    status[6] = (size >> 16) & 0xFF;
+    status[7] = (size >> 8) & 0xFF;
+    status[8] = (size) & 0xFF;
+    //nmumber of chunks:
+    status[9] = (totalChunks >> 8) & 0xFF;
+    status[10]= (totalChunks) & 0xFF;
+    status[11]= 0;
 
-    status[5] = (totalChunks >> 8) & 0xFF;
-    status[6] = (totalChunks) & 0xFF;
-    status[7] = 0;
-
-    pImgStatus->setValue(status, 7);
+    pImgStatus->setValue(status, 11);
     pImgStatus->notify();
 
     int currentChunk;
@@ -136,6 +160,36 @@ bool sendImage(uint8_t* image, uint size ){
     delay(150); // seems like the last chunk keeps goig missing, so i added a longer delay here 
 
     return currentChunk == totalChunks;
+}
+
+void sendNotAvailable(uint32_t index) {
+    uint8_t msg[5];
+    msg[0] = 'N';
+
+    msg[1] = (index >> 24) & 0xFF;
+    msg[2] = (index >> 16) & 0xFF;
+    msg[3] = (index >> 8) & 0xFF;
+    msg[4] = index & 0xFF;
+
+    pImgStatus->setValue(msg, 5);
+    pImgStatus->notify();
+    delay(150);
+}
+
+void sendError(uint32_t index, uint8_t code) {
+    uint8_t msg[6];
+    msg[0] = 'X';
+
+    msg[1] = (index >> 24) & 0xFF;
+    msg[2] = (index >> 16) & 0xFF;
+    msg[3] = (index >> 8) & 0xFF;
+    msg[4] = index & 0xFF;
+
+    msg[5] = code;
+
+    pImgStatus->setValue(msg, 6);
+    pImgStatus->notify();
+    delay(150);
 }
 
 #pragma endregion BLE
@@ -181,14 +235,17 @@ camera_fb_t * framebuffer;
 
 #pragma region SD
 
-RTC_DATA_ATTR uint16_t img_counter;
+#define SD_CS 21
+
+bool exists_SD = 0;
+
 
 #pragma endregion SD
 
 
 #pragma region MAIN
-#define BLE_TIMEOUT (25) //in s
-#define TIME_TO_SLEEP (60)   // in s
+#define BLE_TIMEOUT (10) //in s
+#define TIME_TO_SLEEP (20)   // in s
 
 inline unsigned long toMicros(unsigned long sec){ 
     return sec * 1000000UL;
@@ -255,7 +312,8 @@ void setup() {
     }
     delay(5000);
     
-    
+    ///SD setup:
+    exists_SD = SD.begin(21);
     
     
 }
@@ -278,7 +336,15 @@ void loop(){
                 img_state = TAKE_PICTURE;
             } else {
                 capture_attempts = 0;
-                img_state = WAIT_FOR_CONNECTION; 
+                img_state = WAIT_FOR_CONNECTION;
+                latest_index++;
+                // char path[15];
+                // sprintf(path, "/%04d.jpg", latest_index);
+                // fs::File file = SD.open(path, "w", true);
+                // file.write(framebuffer->buf, framebuffer->len);
+                // file.close();
+
+                // latest_index++;
             }
             
             break;
@@ -295,18 +361,48 @@ void loop(){
             
             break;
         }
-        case(SEND_FROM_SD):{
-            //TODO: implement sending from sd here
-            Serial.println("Sending from SD");
+        case(SEND_FROM_SD):{ //todo: improve sending logic, combine SEND_FROM_SD and SEND_IMAGE
             
-            img_state = SEND_IMAGE; //send latest image once previous ones were sent
+            
+            if( requested_image_index < latest_index && data_request && !done){
+                Serial.println("Sending from SD");
+                char imgPath[10];
+                sprintf(imgPath, "/%04d.jpg", requested_image_index);
+                if(!SD.exists(imgPath)){
+                    sendError(requested_image_index, 0);
+                    break;
+                }
+                fs::File file = SD.open(imgPath, "r", false);
+                int fileSize = file.size();
+                uint8_t* image;
+                image = (uint8_t *) ps_malloc(fileSize);
+                if(image == NULL){
+                    sendError(requested_image_index, 1);
+                    break;
+                }
+                file.read(image, fileSize); // loads whole image into buffer, not too efficient, but works for now
+                sendImage(image, fileSize, requested_image_index);
+                free(image);
+                done = true;
+            }
+
+            if( requested_image_index == latest_index && data_request){
+                img_state = SEND_IMAGE; //send latest image once previous ones were sent
+                break;
+            }
+            if( requested_image_index > latest_index && data_request){
+                sendNotAvailable(requested_image_index);
+                img_state = GO_SLEEP;
+                break;
+            }
+
             break;
         }
         case(SEND_IMAGE):{
             bool sent_image = false;
         
             if(data_request){
-                sent_image = sendImage(framebuffer->buf, framebuffer->len);
+                sent_image = sendImage(framebuffer->buf, framebuffer->len, requested_image_index);
                 send_attempts++;
                 if(sent_image) {
                     img_state = GO_SLEEP;
@@ -327,6 +423,13 @@ void loop(){
         case(SAVE_TO_SD):{
             Serial.println("Saving to SD Card");
             //TODO: implement saving here
+
+            char imgPath[10];
+            sprintf(imgPath, "/%04d.jpg", latest_index);
+            fs::File file = SD.open(imgPath, "w", true);
+            file.write(framebuffer->buf, framebuffer->len);
+            file.close();
+
             img_state = GO_SLEEP;
             break;
         }
