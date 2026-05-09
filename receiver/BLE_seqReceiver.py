@@ -12,22 +12,24 @@ CMD_BAT_UUID = "726530db-8845-4241-a10e-e26f20b095d6"
 
 TARGET_NAME = "AIGLS"
 
-image_counter = 1440
+image_counter = 1
 #current_index = 1
 
 # Image state
 expected_chunks = 0
 received_chunks = {}
 image_size = 0
+image_attempts = 0
 
 receiving = False
 waiting_for_response = False
 
 def reset_state():
-    global expected_chunks, received_chunks, image_size
+    global expected_chunks, received_chunks, image_size, image_attempts
     expected_chunks = 0
     received_chunks = {}
     image_size = 0
+    image_attempts = 0
 
 def handle_status(_, data):
     global image_counter
@@ -117,8 +119,11 @@ def save_image():
     ordered = []
     for i in range(expected_chunks):
         if i not in received_chunks:
-            print(f"Missing chunk {i}, requesting image again")
-            image_counter -= 1
+            print(f"Missing chunk {i}")
+            if image_attempts < 3 : 
+                print("attempting again...")
+                image_counter -= 1
+                image_attempts += 1
             return
         ordered.append(received_chunks[i])
 

@@ -290,8 +290,10 @@ void clearSD(){
 
 
 #pragma region MAIN
-#define BLE_TIMEOUT (10) //in s
-#define TIME_TO_SLEEP (20)   // in s
+//some time things, in s
+#define BLE_TIMEOUT     (10ULL)     //in s
+#define TIME_TO_SLEEP   (60ULL)   // in s
+#define REQUEST_TIMEOUT (2ULL) //timeout for img_state = SEND, if no commands are received for x amount of time, sends error, to "wake up" the client
 
 inline unsigned long toMicros(unsigned long sec){ 
     return sec * 1000000UL;
@@ -369,10 +371,12 @@ void setup() {
     delay(5000);
     
     ///SD setup:
+    Serial.println("Initializing SD:");
     exists_SD = SD.begin(21);
     // if(exists_SD){
     //     latest_index = findLastImage();
     // }
+    
     
 }
 
@@ -427,7 +431,7 @@ void loop(){
             if(client_connected) {
                     img_state = SEND;
                     sendStartTime = micros();
-                    //sendBattery(getBattery());
+                    sendBattery(getBattery());
                     break;
             }
 
