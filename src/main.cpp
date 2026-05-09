@@ -39,9 +39,15 @@ NimBLECharacteristic *pBatChar;
 bool client_connected = false;
 bool data_request = false;
 
+uint16_t current_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
 RTC_DATA_ATTR uint32_t latest_index = 0;
 uint32_t requested_image_index = 0;
 
+//Control
+bool goToSleep = false;
+bool reset = false;
+uint32_t sleepTimeS = 0;
 
 bool done = 0;  ///remove later
 //BLE Callbacks
@@ -53,6 +59,8 @@ class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
         Serial.print("Data is:");
         Serial.write(val.data(), val.length());
         Serial.println();
+
+        current_conn_handle = connInfo.getConnHandle();
 
         if (val.length() >= 5 && val.data()[0] == 'R') {
             uint32_t requestedIndex =
@@ -81,6 +89,19 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
         Serial.write(val.data(), val.length());
         Serial.println();        
         //TODO: implement control from phone here
+
+        if (val.length() >= 5 && val.data()[0] == 'S') {
+            sleepTimeS =
+                (val.data()[1] << 24) |
+                (val.data()[2] << 16) |
+                (val.data()[3] << 8)  |
+                (val.data()[4]);
+            goToSleep = true;
+            Serial.printf("Sleep for: %luS\n", sleepTimeS);
+        }
+        if( val.length() >= 1 && val.data()[0] == 'R'){
+            reset = true;
+        }
     }
 };
 
@@ -157,23 +178,28 @@ bool sendImage(uint8_t* image, uint size , uint index){
     pImgStatus->setValue('E');
     pImgStatus->notify();
 
-    delay(150); // seems like the last chunk keeps goig missing, so i added a longer delay here 
+    //delay(150); // seems like the last chunk keeps goig missing, so i added a longer delay here 
 
     return currentChunk == totalChunks;
 }
 
-void sendNotAvailable(uint32_t index) {
-    uint8_t msg[5];
+void sendNotAvailable(uint32_t index, uint32_t last_available) {
+    uint8_t msg[9];
     msg[0] = 'N';
 
     msg[1] = (index >> 24) & 0xFF;
     msg[2] = (index >> 16) & 0xFF;
     msg[3] = (index >> 8) & 0xFF;
     msg[4] = index & 0xFF;
+    
+    msg[5] = (last_available >> 24) & 0xFF;
+    msg[6] = (last_available >> 16) & 0xFF;
+    msg[7] = (last_available >> 8) & 0xFF;
+    msg[8] = last_available & 0xFF;
 
-    pImgStatus->setValue(msg, 5);
+    pImgStatus->setValue(msg, 9);
     pImgStatus->notify();
-    delay(150);
+    
 }
 
 void sendError(uint32_t index, uint8_t code) {
@@ -189,7 +215,7 @@ void sendError(uint32_t index, uint8_t code) {
 
     pImgStatus->setValue(msg, 6);
     pImgStatus->notify();
-    delay(150);
+    
 }
 
 #pragma endregion BLE
@@ -238,7 +264,28 @@ camera_fb_t * framebuffer;
 #define SD_CS 21
 
 bool exists_SD = 0;
+uint findLastImage(){
+    uint lastimage = 0;
+    char path[16];
+    for(int i = 0; i < 9999 ; i++){
+        sprintf(path, "/%04d.jpg", i);
+        if(SD.exists(path)){
+            lastimage = i;
+        }
+    }
+    return lastimage;
+}
 
+void clearSD(){
+    char path[16];
+    for(int i = 0; i < 9999 ; i++){
+        sprintf(path, "/%04d.jpg", i);
+        if(SD.exists(path)){
+            SD.remove(path);
+        }
+    }
+    return;
+}
 
 #pragma endregion SD
 
@@ -251,13 +298,23 @@ inline unsigned long toMicros(unsigned long sec){
     return sec * 1000000UL;
 }
 
+uint8_t getBattery(){
+    //dummy function
+    //TODO: implement proper battery management and calculation
+    return 16;
+}
+void sendBattery(uint8_t batteryPercent){
+    pBatChar->setValue(batteryPercent);
+    pBatChar->notify();
+}
+
+
 unsigned long start_time;
 
 enum ImgState{
     TAKE_PICTURE,
     WAIT_FOR_CONNECTION,
-    SEND_FROM_SD,
-    SEND_IMAGE,
+    SEND,
     SAVE_TO_SD,
     GO_SLEEP
 } img_state;
@@ -314,14 +371,34 @@ void setup() {
     
     ///SD setup:
     exists_SD = SD.begin(21);
-    
+    // if(exists_SD){
+    //     latest_index = findLastImage();
+    // }
     
 }
+
+uint64_t sendStartTime = 0;
 
 void loop(){
 
     static int capture_attempts = 0;
     static int send_attempts = 0;
+
+    // if(reset){
+    //     Serial.println("Received RESET");
+    //     clearSD();
+    //     esp_restart();
+
+    // }
+    // if(goToSleep){
+    //     Serial.print("Received command SLEEP, sleeping for: ");
+    //     Serial.println(sleepTimeS);
+
+    //     esp_camera_deinit();
+    //     esp_sleep_enable_timer_wakeup(toMicros(sleepTimeS));
+    //     esp_deep_sleep_start();
+    // }
+
     switch(img_state){
         case(TAKE_PICTURE) : {
             //digitalWrite(LED_BUILTIN, HIGH);
@@ -338,13 +415,6 @@ void loop(){
                 capture_attempts = 0;
                 img_state = WAIT_FOR_CONNECTION;
                 latest_index++;
-                // char path[15];
-                // sprintf(path, "/%04d.jpg", latest_index);
-                // fs::File file = SD.open(path, "w", true);
-                // file.write(framebuffer->buf, framebuffer->len);
-                // file.close();
-
-                // latest_index++;
             }
             
             break;
@@ -352,24 +422,29 @@ void loop(){
         case(WAIT_FOR_CONNECTION):{
             if(micros() - start_time < toMicros(BLE_TIMEOUT) ){
                 if(client_connected) {
-                    img_state = SEND_FROM_SD;
+                    img_state = SEND;
+                    sendStartTime = micros();
+                    //sendBattery(getBattery());
                 }
-            } else { //TODO: add logic for SEND_FROM_SD here
+            } else { 
                 Serial.println("BLE Connection Timed out...");
                 img_state = SAVE_TO_SD;
             }
             
             break;
         }
-        case(SEND_FROM_SD):{ //todo: improve sending logic, combine SEND_FROM_SD and SEND_IMAGE
-            
-            
-            if( requested_image_index < latest_index && data_request && !done){
+        
+        case(SEND):{
+            //bool sent_image = false;
+        
+
+            if( requested_image_index < latest_index && data_request ){
                 Serial.println("Sending from SD");
                 char imgPath[10];
                 sprintf(imgPath, "/%04d.jpg", requested_image_index);
                 if(!SD.exists(imgPath)){
                     sendError(requested_image_index, 0);
+                    data_request = false;
                     break;
                 }
                 fs::File file = SD.open(imgPath, "r", false);
@@ -378,47 +453,36 @@ void loop(){
                 image = (uint8_t *) ps_malloc(fileSize);
                 if(image == NULL){
                     sendError(requested_image_index, 1);
+                    data_request = false;
+                    file.close();
                     break;
                 }
                 file.read(image, fileSize); // loads whole image into buffer, not too efficient, but works for now
                 sendImage(image, fileSize, requested_image_index);
+                data_request = false;
                 free(image);
-                done = true;
-            }
-
-            if( requested_image_index == latest_index && data_request){
-                img_state = SEND_IMAGE; //send latest image once previous ones were sent
-                break;
-            }
-            if( requested_image_index > latest_index && data_request){
-                sendNotAvailable(requested_image_index);
-                img_state = GO_SLEEP;
-                break;
-            }
-
-            break;
-        }
-        case(SEND_IMAGE):{
-            bool sent_image = false;
-        
-            if(data_request){
-                sent_image = sendImage(framebuffer->buf, framebuffer->len, requested_image_index);
-                send_attempts++;
-                if(sent_image) {
-                    img_state = GO_SLEEP;
-                    send_attempts = 0;
-                    break; //breaks switch
-                }
-                if(send_attempts < ALLOWED_ATTEMPTS){
-                    img_state = WAIT_FOR_CONNECTION;
-                    break; //breaks switch
-                } else {
-                    img_state = SAVE_TO_SD;
-                    break; //breaks switch
-                }
-            }
+                file.close();
                 
+                break;
+            }
+            if( requested_image_index == latest_index && data_request){
+                sendImage(framebuffer->buf, framebuffer->len, requested_image_index);
+                break;
+            }
+            if( requested_image_index > latest_index && data_request) {
+                sendNotAvailable(requested_image_index, latest_index);
+                data_request = false;
+                if( requested_image_index == latest_index + 1){
+                    img_state = GO_SLEEP;
+                }
+                break;
+            }
+            if ( !client_connected ||  ( micros() - sendStartTime > toMicros(BLE_TIMEOUT) )  ){
+                img_state = WAIT_FOR_CONNECTION;
+                sendError(0, 5); //"yo something timed out!"
+            }
             break;
+
         }
         case(SAVE_TO_SD):{
             Serial.println("Saving to SD Card");
@@ -443,6 +507,8 @@ void loop(){
             if( ( now - start_time ) < toMicros(TIME_TO_SLEEP) ) { // go to sleep for a non-negative amount of time
                 uint64_t timeToSleep = toMicros(TIME_TO_SLEEP) - ( now - start_time );
 
+                pServer->disconnect(current_conn_handle);
+                delay(200);
                 esp_camera_deinit();
                 esp_sleep_enable_timer_wakeup(timeToSleep);
                 esp_deep_sleep_start();

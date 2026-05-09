@@ -6,9 +6,13 @@ CONTROL_UUID = "00001234-0000-1000-8000-00805f9b34fb"
 STATUS_UUID  = "00001235-0000-1000-8000-00805f9b34fb"
 DATA_UUID    = "00001236-0000-1000-8000-00805f9b34fb"
 
+CMD_CMD_UUID = "06e025b3-597e-4c94-87df-c4bd1b4e0b0e"
+CMD_BAT_UUID = "726530db-8845-4241-a10e-e26f20b095d6"
+
+
 TARGET_NAME = "AIGLS"
 
-image_counter = 1
+image_counter = 1440
 #current_index = 1
 
 # Image state
@@ -17,6 +21,7 @@ received_chunks = {}
 image_size = 0
 
 receiving = False
+waiting_for_response = False
 
 def reset_state():
     global expected_chunks, received_chunks, image_size
@@ -24,11 +29,11 @@ def reset_state():
     received_chunks = {}
     image_size = 0
 
-
 def handle_status(_, data):
     global image_counter
     global expected_chunks
     global receiving
+    global waiting_for_response
 
     if not data:
         return
@@ -36,36 +41,46 @@ def handle_status(_, data):
     msg_type = chr(data[0])
 
     if msg_type == 'S':
+        reset_state()
+
         index = int.from_bytes(data[1:5], 'big')
         size = int.from_bytes(data[5:9], 'big')
         chunks = int.from_bytes(data[9:11], 'big')
 
-        print(f"Receiving image {index}")
-        reset_state()
         expected_chunks = chunks
         receiving = True
-        return
+
+        print(f"Receiving image {index}")
 
     elif msg_type == 'E':
+        print("Image complete")
+
         save_image()
+
         image_counter += 1
 
+        receiving = False
+        waiting_for_response = False
 
     elif msg_type == 'N':
         index = int.from_bytes(data[1:5], 'big')
-        print(f"Image {index} not ready yet")
-        # retry same index later
+        last_available = int.from_bytes(data[5:9], 'big')
+
+        print(f"Image {index} not ready, last one was: {last_available}")
+
+        if(last_available + 1 < index): #check if gone way over
+            image_counter = last_available 
+        # DON'T increment
+        receiving = False
+        waiting_for_response = False
 
     elif msg_type == 'X':
         index = int.from_bytes(data[1:5], 'big')
         print(f"Error on image {index}, err: {data[5]}")
-        image_counter += 1
-
-
-    if msg_type != 'S':
+        if data[5] != 5: 
+            image_counter += 1
         receiving = False
-        
-        # await client.write_gatt_char(CONTROL_UUID, msg)
+        waiting_for_response = False
 
 
 
@@ -82,8 +97,11 @@ def handle_data(_, data: bytearray):
 
 async def request_image(client):
     global image_counter
+    global waiting_for_response
+
     msg = b'R' + image_counter.to_bytes(4, 'big')
     await client.write_gatt_char(CONTROL_UUID, msg)
+    waiting_for_response = True
     print(f"Requested image {image_counter}")
 
 
@@ -99,7 +117,8 @@ def save_image():
     ordered = []
     for i in range(expected_chunks):
         if i not in received_chunks:
-            print(f"Missing chunk {i}, skipping image")
+            print(f"Missing chunk {i}, requesting image again")
+            image_counter -= 1
             return
         ordered.append(received_chunks[i])
 
@@ -127,6 +146,47 @@ async def find_device():
 
         await asyncio.sleep(1)  # avoid hammering scan
 
+def handle_battery(_, data: bytearray):
+    percentage = int.from_bytes(data)
+    print(f"Battery percentage is {percentage}")
+
+
+async def terminal_input_loop(client):
+    loop = asyncio.get_running_loop()
+
+    while client.is_connected:
+
+        try:
+            # non-blocking terminal input
+            cmd = await loop.run_in_executor(None, input, "> ")
+
+            cmd = cmd.strip()
+
+            valid = False
+
+            # Accept plain R
+            if cmd == "R":
+                valid = True
+
+            # Accept S<number>
+            elif len(cmd) >= 2 and cmd[0] == 'S' and cmd[1:].isdigit():
+                valid = True
+
+            if valid:
+                await client.write_gatt_char(
+                    CMD_CMD_UUID,
+                    cmd.encode()
+                )
+
+                print(f"Sent CMD: {cmd}")
+
+            else:
+                print("Invalid command")
+
+        except Exception as e:
+            print(f"Terminal input error: {e}")
+            return
+
 
 async def connect_and_receive():
     while True:
@@ -135,22 +195,24 @@ async def connect_and_receive():
         try:
             async with BleakClient(device.address) as client:
                 print("Connected!")
+                #terminal_task = asyncio.create_task( terminal_input_loop(client) )
 
                 await client.start_notify(STATUS_UUID, handle_status)
                 await client.start_notify(DATA_UUID, handle_data)
 
+                await client.start_notify(CMD_BAT_UUID, handle_battery)
+
                 # Give ESP a moment after connection
                 await asyncio.sleep(1)
 
-                # print("Requesting image...")
-                # await client.write_gatt_char(CONTROL_UUID, b'R')
-
+                
                 # Stay connected until ESP disconnects (sleep)
                 while client.is_connected:
-                    if(not receiving):
+                    if not waiting_for_response:
                         await request_image(client)
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.2)
 
+                #terminal_task.cancel()
                 print("Disconnected (likely ESP sleep)")
 
         except BleakError as e:
