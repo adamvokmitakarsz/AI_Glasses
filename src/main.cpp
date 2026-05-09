@@ -88,7 +88,6 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
         Serial.print("Data is:");
         Serial.write(val.data(), val.length());
         Serial.println();        
-        //TODO: implement control from phone here
 
         if (val.length() >= 5 && val.data()[0] == 'S') {
             sleepTimeS =
@@ -97,7 +96,7 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
                 (val.data()[3] << 8)  |
                 (val.data()[4]);
             goToSleep = true;
-            Serial.printf("Sleep for: %luS\n", sleepTimeS);
+            Serial.printf("Sleep for: %lu s\n", sleepTimeS);
         }
         if( val.length() >= 1 && val.data()[0] == 'R'){
             reset = true;
@@ -278,7 +277,7 @@ uint findLastImage(){
 
 void clearSD(){
     char path[16];
-    for(int i = 0; i < 9999 ; i++){
+    for(int i = 0; i <= latest_index ; i++){
         sprintf(path, "/%04d.jpg", i);
         if(SD.exists(path)){
             SD.remove(path);
@@ -384,20 +383,25 @@ void loop(){
     static int capture_attempts = 0;
     static int send_attempts = 0;
 
-    // if(reset){
-    //     Serial.println("Received RESET");
-    //     clearSD();
-    //     esp_restart();
+    if(reset){
+        Serial.println("Received RESET");
 
-    // }
-    // if(goToSleep){
-    //     Serial.print("Received command SLEEP, sleeping for: ");
-    //     Serial.println(sleepTimeS);
+        pServer->disconnect(current_conn_handle);
+        delay(200);
+        clearSD();
+        esp_restart();
+    }
+    
+    if(goToSleep){
+        Serial.print("Received command SLEEP, sleeping for: ");
+        Serial.println(sleepTimeS);
 
-    //     esp_camera_deinit();
-    //     esp_sleep_enable_timer_wakeup(toMicros(sleepTimeS));
-    //     esp_deep_sleep_start();
-    // }
+        pServer->disconnect(current_conn_handle);
+        delay(200);
+        esp_camera_deinit();
+        esp_sleep_enable_timer_wakeup(toMicros(sleepTimeS));
+        esp_deep_sleep_start();
+    }
 
     switch(img_state){
         case(TAKE_PICTURE) : {
@@ -420,13 +424,14 @@ void loop(){
             break;
         }
         case(WAIT_FOR_CONNECTION):{
-            if(micros() - start_time < toMicros(BLE_TIMEOUT) ){
-                if(client_connected) {
+            if(client_connected) {
                     img_state = SEND;
                     sendStartTime = micros();
                     //sendBattery(getBattery());
-                }
-            } else { 
+                    break;
+            }
+
+            if(micros() - start_time > toMicros(BLE_TIMEOUT) ){ 
                 Serial.println("BLE Connection Timed out...");
                 img_state = SAVE_TO_SD;
             }

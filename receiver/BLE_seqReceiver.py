@@ -167,17 +167,16 @@ async def terminal_input_loop(client):
             # Accept plain R
             if cmd == "R":
                 valid = True
+                await client.write_gatt_char( CMD_CMD_UUID, b'R' )
 
             # Accept S<number>
             elif len(cmd) >= 2 and cmd[0] == 'S' and cmd[1:].isdigit():
+                num = int(cmd[1:])
+                payload = b'S' + num.to_bytes(4, 'big')
+                await client.write_gatt_char( CMD_CMD_UUID, payload )
                 valid = True
 
             if valid:
-                await client.write_gatt_char(
-                    CMD_CMD_UUID,
-                    cmd.encode()
-                )
-
                 print(f"Sent CMD: {cmd}")
 
             else:
@@ -195,7 +194,7 @@ async def connect_and_receive():
         try:
             async with BleakClient(device.address) as client:
                 print("Connected!")
-                #terminal_task = asyncio.create_task( terminal_input_loop(client) )
+                terminal_task = asyncio.create_task( terminal_input_loop(client) )
 
                 await client.start_notify(STATUS_UUID, handle_status)
                 await client.start_notify(DATA_UUID, handle_data)
@@ -212,7 +211,7 @@ async def connect_and_receive():
                         await request_image(client)
                     await asyncio.sleep(0.2)
 
-                #terminal_task.cancel()
+                terminal_task.cancel()
                 print("Disconnected (likely ESP sleep)")
 
         except BleakError as e:
