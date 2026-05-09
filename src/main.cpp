@@ -214,6 +214,11 @@ void sendError(uint32_t index, uint8_t code) {
     
 }
 
+void sendBattery(uint8_t batteryPercent){
+    pBatChar->setValue(batteryPercent);
+    pBatChar->notify();
+}
+
 #pragma endregion BLE
 
 
@@ -257,30 +262,88 @@ camera_fb_t * framebuffer;
 
 #pragma region SD
 
+#define MAX_INDEX 2500
 #define SD_CS 21
 
 bool exists_SD = 0;
-uint findLastImage(){
-    uint lastimage = 0;
-    char path[16];
-    for(int i = 0; i < 9999 ; i++){
-        sprintf(path, "/%04d.jpg", i);
-        if(SD.exists(path)){
-            lastimage = i;
-        }
+
+uint32_t findLatestIndex() {
+
+    uint32_t maxIndex = 0;
+
+    File root = SD.open("/");
+
+    if(!root || !root.isDirectory()) {
+        Serial.println("Failed to open root");
+        return 0;
     }
-    return lastimage;
+
+    File file = root.openNextFile();
+
+    while(file) {
+
+        if(!file.isDirectory()) {
+
+            String name = file.name();
+            name = "/" + name;
+            // Example: "/0001.jpg"
+
+            if(name.endsWith(".jpg")) {
+
+                int slash = name.lastIndexOf('/');
+                int dot   = name.lastIndexOf('.');
+
+                if(slash >= 0 && dot > slash) {
+
+                    String numStr = name.substring(slash + 1, dot);
+
+                    uint32_t index = numStr.toInt();
+
+                    if(index > maxIndex) {
+                        maxIndex = index;
+                    }
+                }
+            }
+        }
+
+        file.close();
+
+        file = root.openNextFile();
+    }
+
+    root.close();
+
+    return maxIndex;
 }
 
-void clearSD(){
-    char path[16];
-    for(int i = 0; i <= latest_index ; i++){
-        sprintf(path, "/%04d.jpg", i);
-        if(SD.exists(path)){
-            SD.remove(path);
-        }
+void deleteAllImages() {
+
+    File root = SD.open("/");
+
+    if(!root || !root.isDirectory()) {
+        Serial.println("Failed to open SD root");
+        return;
     }
-    return;
+
+    File file = root.openNextFile();
+
+    while(file) {
+
+        String path = file.name();
+
+        file.close();
+        path = "/" + path;
+        Serial.print("Deleting ");
+        Serial.println(path);
+
+        if(!SD.remove(path)) {
+            Serial.println("Delete failed");
+        }
+
+        file = root.openNextFile();
+    }
+    latest_index = 0;
+    Serial.println("Done deleting");
 }
 
 #pragma endregion SD
@@ -289,7 +352,7 @@ void clearSD(){
 #pragma region MAIN
 //some time things, in s
 #define BLE_TIMEOUT     (10ULL)     //in s
-#define TIME_TO_SLEEP   (60ULL)   // in s
+#define TIME_TO_SLEEP   (20ULL)   // in s
 #define REQUEST_TIMEOUT (2ULL) //timeout for img_state = SEND, if no commands are received for x amount of time, sends error, to "wake up" the client
 
 inline unsigned long toMicros(unsigned long sec){ 
@@ -301,10 +364,7 @@ uint8_t getBattery(){
     //TODO: implement proper battery management and calculation
     return 16;
 }
-void sendBattery(uint8_t batteryPercent){
-    pBatChar->setValue(batteryPercent);
-    pBatChar->notify();
-}
+
 
 
 unsigned long start_time;
@@ -371,7 +431,7 @@ void setup() {
     Serial.println("Initializing SD:");
     exists_SD = SD.begin(21);
     // if(exists_SD){
-    //     latest_index = findLastImage();
+    //     latest_index = findLatestIndex();
     // }
     
     
@@ -390,7 +450,7 @@ void loop(){
 
         pServer->disconnect(current_conn_handle);
         delay(200);
-        clearSD();
+        deleteAllImages();
         esp_restart();
     }
     
@@ -420,7 +480,7 @@ void loop(){
             } else {
                 capture_attempts = 0;
                 img_state = WAIT_FOR_CONNECTION;
-                latest_index++;
+                latest_index = (latest_index + 1) % MAX_INDEX; // circular thing
             }
             
             break;
@@ -490,7 +550,7 @@ void loop(){
                 }
                 break;
             }
-            if ( !client_connected ||  ( micros() - sendStartTime > toMicros(BLE_TIMEOUT) )  ){
+            if ( !client_connected ||  ( micros() - sendStartTime > toMicros(REQUEST_TIMEOUT) )  ){
                 img_state = WAIT_FOR_CONNECTION;
                 sendError(0, 5); //"yo something timed out!"
             }
