@@ -21,7 +21,6 @@
 #define MTU_RATE 512
 #define BUFFERSIZE 396
 
-#define ALLOWED_ATTEMPTS (3)
  
 uint8_t packet[BUFFERSIZE + 2]; //global, to make memory usage more obvious, might not make sense
 
@@ -44,12 +43,11 @@ uint16_t current_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 RTC_DATA_ATTR uint32_t latest_index = 0;
 uint32_t requested_image_index = 0;
 
-//Control
+//For CMDService
 bool goToSleep = false;
 bool reset = false;
 uint32_t sleepTimeS = 0;
 
-bool done = 0;  ///remove later
 //BLE Callbacks
 class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
@@ -73,7 +71,6 @@ class ImgControlCallbacks : public NimBLECharacteristicCallbacks {
 
             requested_image_index = requestedIndex;
             data_request = true;
-            done = false;
         } else {
             data_request = false;
         }
@@ -251,7 +248,7 @@ static camera_config_t camera_config = {
         .grab_mode      = CAMERA_GRAB_LATEST
     };
 
-bool took_picture=false;
+//bool took_picture=false;
 camera_fb_t * framebuffer;
 
 
@@ -386,6 +383,7 @@ void loop(){
 
     static int capture_attempts = 0;
     static int send_attempts = 0;
+    char imgPath[32];
 
     if(reset){
         Serial.println("Received RESET");
@@ -444,12 +442,18 @@ void loop(){
         }
         
         case(SEND):{
-            //bool sent_image = false;
-        
+
+            if( requested_image_index - 1 < latest_index && data_request ){ //delete previous image: if next is already requesting => there was no error
+                Serial.println("Deleting previous");
+                sprintf(imgPath, "/%04d.jpg", requested_image_index - 1);
+                if(SD.exists(imgPath)) {
+                    SD.remove(imgPath);
+                }
+            }
 
             if( requested_image_index < latest_index && data_request ){
                 Serial.println("Sending from SD");
-                char imgPath[10];
+                //char imgPath[32];
                 sprintf(imgPath, "/%04d.jpg", requested_image_index);
                 if(!SD.exists(imgPath)){
                     sendError(requested_image_index, 0);
@@ -497,7 +501,7 @@ void loop(){
             Serial.println("Saving to SD Card");
             //TODO: implement saving here
 
-            char imgPath[10];
+            //char imgPath[10];
             sprintf(imgPath, "/%04d.jpg", latest_index);
             fs::File file = SD.open(imgPath, "w", true);
             file.write(framebuffer->buf, framebuffer->len);
