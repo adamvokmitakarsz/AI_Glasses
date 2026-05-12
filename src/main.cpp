@@ -4,24 +4,13 @@
 #include <SPI.h>
 #include <SD.h>
 
-
+//Config File
+#include "config.h"
 
 #pragma region BLE
 
 //Variables and data for BLE communication 
-#define IMG_SERVICE_UUID    "0000abcd-0000-1000-8000-00805f9b34fb"
-#define IMG_CONTROL_UUID    "00001234-0000-1000-8000-00805f9b34fb"
-#define IMG_STATUS_UUID     "00001235-0000-1000-8000-00805f9b34fb"
-#define IMG_DATA_UUID       "00001236-0000-1000-8000-00805f9b34fb"
 
-#define CMD_SERVICE_UUID    "6d22fa7b-4f6c-4bd7-962c-a343c00060a1"
-#define CMD_CMD_UUID        "06e025b3-597e-4c94-87df-c4bd1b4e0b0e"
-#define CMD_BAT_UUID        "726530db-8845-4241-a10e-e26f20b095d6"
-
-#define MTU_RATE 512
-#define BUFFERSIZE 396
-
-#define BLE_PASSKEY 123456
  
 uint8_t packet[BUFFERSIZE + 2]; //global, to make memory usage more obvious, might not make sense
 
@@ -102,28 +91,6 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
-// class ServerCallbacks : public NimBLEServerCallbacks {
-//     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-//         client_connected = true;
-        
-//         Serial.print("Connected: ");
-//         Serial.println(connInfo.getAddress().toString().c_str());
-//     }
-
-//     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
-//         client_connected = false;
-
-//         Serial.print("Disconnected: ");
-//         Serial.println(connInfo.getAddress().toString().c_str());
-//         NimBLEDevice::startAdvertising();
-//     }
-    
-//     void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override { 
-//        Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, connInfo.getConnHandle());
-//     }
-
-// };
-
 class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -151,11 +118,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             connInfo.isBonded()
         );
 
-        if (connInfo.isEncrypted()) {   // don't require isAuthenticated() for Just Works
-            Serial.println("Link encrypted, allowing data flow");
+        if (connInfo.isAuthenticated()) {   // don't require isAuthenticated() for Just Works
+            Serial.println("Auth succes, allowing data flow");
             client_connected = true;
         } else {
-            Serial.println("Encryption failed — kicking client");
+            Serial.println("Auth failed — kicking client");
             NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
         }
     }
@@ -198,10 +165,6 @@ bool sendImage(uint8_t* image, uint size , uint index){
     for (currentChunk = 0; currentChunk < totalChunks && client_connected; currentChunk++){
         int msgsize = ( (size - currentChunk*BUFFERSIZE)  < BUFFERSIZE ) ? (size - currentChunk*BUFFERSIZE) : (BUFFERSIZE);
 
-        // Serial.print("C[");
-        // Serial.print(i);
-        // Serial.print("]/");
-        // Serial.println(totalChunks);
         packet[0] = (currentChunk >> 8) & 0xFF;
         packet[1] = currentChunk & 0xFF; 
         memcpy(packet+2, image + BUFFERSIZE*currentChunk, msgsize);
@@ -307,15 +270,13 @@ camera_fb_t * framebuffer;
 
 #pragma region SD
 
-#define MAX_INDEX 2500
+
 #define SD_CS 21
 
 bool exists_SD = 0;
 
 uint32_t findLatestIndex() {
-
     uint32_t maxIndex = 0;
-
     File root = SD.open("/");
 
     if(!root || !root.isDirectory()) {
@@ -324,38 +285,25 @@ uint32_t findLatestIndex() {
     }
 
     File file = root.openNextFile();
-
     while(file) {
-
         if(!file.isDirectory()) {
-
             String name = file.name();
             name = "/" + name;
-            // Example: "/0001.jpg"
-
             if(name.endsWith(".jpg")) {
-
                 int slash = name.lastIndexOf('/');
                 int dot   = name.lastIndexOf('.');
-
                 if(slash >= 0 && dot > slash) {
-
                     String numStr = name.substring(slash + 1, dot);
-
                     uint32_t index = numStr.toInt();
-
                     if(index > maxIndex) {
                         maxIndex = index;
                     }
                 }
             }
         }
-
         file.close();
-
         file = root.openNextFile();
     }
-
     root.close();
 
     return maxIndex;
@@ -364,18 +312,14 @@ uint32_t findLatestIndex() {
 void deleteAllImages() {
 
     File root = SD.open("/");
-
     if(!root || !root.isDirectory()) {
         Serial.println("Failed to open SD root");
         return;
     }
 
     File file = root.openNextFile();
-
     while(file) {
-
         String path = file.name();
-
         file.close();
         path = "/" + path;
         Serial.print("Deleting ");
@@ -396,9 +340,6 @@ void deleteAllImages() {
 
 #pragma region MAIN
 //some time things, in s
-#define BLE_TIMEOUT     (200ULL)     //in s
-#define TIME_TO_SLEEP   (30ULL)   // in s
-#define REQUEST_TIMEOUT (2ULL) //timeout for img_state = SEND, if no commands are received for x amount of time, sends error, to "wake up" the client
 
 inline unsigned long toMicros(unsigned long sec){ 
     return sec * 1000000UL;
@@ -451,9 +392,9 @@ void setup() {
     pImgControl->setCallbacks(new ImgControlCallbacks);
     pCmdChar->setCallbacks(new CmdCallbacks);
 
-    NimBLEDevice::setSecurityAuth(true, false, false);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-    // NimBLEDevice::setSecurityPasskey(BLE_PASSKEY);
+    NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+    NimBLEDevice::setSecurityPasskey(BLE_PASSKEY);
 
     pServer->start();
 
