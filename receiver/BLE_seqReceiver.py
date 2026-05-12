@@ -13,7 +13,7 @@ CMD_BAT_UUID = "726530db-8845-4241-a10e-e26f20b095d6"
 TARGET_NAME = "AIGLS"
 
 image_counter = 1
-#current_index = 1
+
 
 # Image state
 expected_chunks = 0
@@ -108,7 +108,7 @@ async def request_image(client):
 
 
 def save_image():
-    global image_counter
+    global image_counter, image_attempts
 
     if not received_chunks:
         print("No data received")
@@ -198,31 +198,27 @@ async def connect_and_receive():
 
         try:
             async with BleakClient(device.address) as client:
-                print("Connected!")
-                terminal_task = asyncio.create_task( terminal_input_loop(client) )
+                print("Connected")
 
+                # The rest of your connection logic is unchanged
+                terminal_task = asyncio.create_task(terminal_input_loop(client))
                 await client.start_notify(STATUS_UUID, handle_status)
                 await client.start_notify(DATA_UUID, handle_data)
-
                 await client.start_notify(CMD_BAT_UUID, handle_battery)
 
-                # Give ESP a moment after connection
                 await asyncio.sleep(1)
 
-                
-                # Stay connected until ESP disconnects (sleep)
                 while client.is_connected:
                     if not waiting_for_response:
                         await request_image(client)
                     await asyncio.sleep(0.2)
 
                 terminal_task.cancel()
-                print("Disconnected (likely ESP sleep)")
+                print("Disconnected")
 
         except BleakError as e:
-            print(f"Connection error: {e}")
+            print(f"Connection/pairing error: {e}")
 
-        # Wait before retrying (important)
         await asyncio.sleep(2)
 
 

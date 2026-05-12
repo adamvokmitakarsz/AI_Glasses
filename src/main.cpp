@@ -21,6 +21,7 @@
 #define MTU_RATE 512
 #define BUFFERSIZE 396
 
+#define BLE_PASSKEY 123456
  
 uint8_t packet[BUFFERSIZE + 2]; //global, to make memory usage more obvious, might not make sense
 
@@ -101,26 +102,70 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
-class ServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-        client_connected = true;
+// class ServerCallbacks : public NimBLEServerCallbacks {
+//     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+//         client_connected = true;
         
-        Serial.print("Connected: ");
+//         Serial.print("Connected: ");
+//         Serial.println(connInfo.getAddress().toString().c_str());
+//     }
+
+//     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+//         client_connected = false;
+
+//         Serial.print("Disconnected: ");
+//         Serial.println(connInfo.getAddress().toString().c_str());
+//         NimBLEDevice::startAdvertising();
+//     }
+    
+//     void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override { 
+//        Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, connInfo.getConnHandle());
+//     }
+
+// };
+
+class ServerCallbacks : public NimBLEServerCallbacks {
+
+    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+        //client_connected = false; // wait for auth before allowing data flow
+        current_conn_handle = connInfo.getConnHandle();
+        Serial.print("Connected (not yet authenticated): ");
         Serial.println(connInfo.getAddress().toString().c_str());
     }
 
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
         client_connected = false;
-
-        Serial.print("Disconnected: ");
-        Serial.println(connInfo.getAddress().toString().c_str());
+        Serial.printf("Disconnected, reason: %d\n", reason);
         NimBLEDevice::startAdvertising();
     }
-    
-    void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override { 
-       Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, connInfo.getConnHandle());
+
+    void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override {
+        Serial.printf("MTU updated: %u\n", MTU);
     }
 
+    // Called when pairing is complete
+    void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
+        Serial.printf("Auth complete — encrypted: %d, authenticated: %d, bonded: %d\n",
+            connInfo.isEncrypted(),
+            connInfo.isAuthenticated(),
+            connInfo.isBonded()
+        );
+
+        if (connInfo.isEncrypted()) {   // don't require isAuthenticated() for Just Works
+            Serial.println("Link encrypted, allowing data flow");
+            client_connected = true;
+        } else {
+            Serial.println("Encryption failed — kicking client");
+            NimBLEDevice::getServer()->disconnect(connInfo.getConnHandle());
+        }
+    }
+
+    // For DISPLAY_ONLY: called to get the passkey to show
+    uint32_t onPassKeyDisplay() override {
+        uint32_t passkey = NimBLEDevice::getSecurityPasskey();
+        Serial.printf(">>> Passkey: %06lu <<<\n", passkey);
+        return passkey;
+    }
 };
 
 bool sendImage(uint8_t* image, uint size , uint index){
@@ -351,8 +396,8 @@ void deleteAllImages() {
 
 #pragma region MAIN
 //some time things, in s
-#define BLE_TIMEOUT     (10ULL)     //in s
-#define TIME_TO_SLEEP   (20ULL)   // in s
+#define BLE_TIMEOUT     (200ULL)     //in s
+#define TIME_TO_SLEEP   (30ULL)   // in s
 #define REQUEST_TIMEOUT (2ULL) //timeout for img_state = SEND, if no commands are received for x amount of time, sends error, to "wake up" the client
 
 inline unsigned long toMicros(unsigned long sec){ 
@@ -392,9 +437,9 @@ void setup() {
     pServer = NimBLEDevice::createServer(); //create server
     pImgService = pServer->createService(IMG_SERVICE_UUID); //create image service
     
-    pImgControl = pImgService->createCharacteristic(IMG_CONTROL_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR); //command characteristic
-    pImgStatus  = pImgService->createCharacteristic(IMG_STATUS_UUID, NIMBLE_PROPERTY::NOTIFY); //status characteristic
-    pImgData    = pImgService->createCharacteristic(IMG_DATA_UUID, NIMBLE_PROPERTY::NOTIFY);  //data characteristic
+    pImgControl = pImgService->createCharacteristic(IMG_CONTROL_UUID, NIMBLE_PROPERTY::WRITE ); //command characteristic
+    pImgStatus  = pImgService->createCharacteristic(IMG_STATUS_UUID,  NIMBLE_PROPERTY::NOTIFY); //status characteristic
+    pImgData    = pImgService->createCharacteristic(IMG_DATA_UUID,    NIMBLE_PROPERTY::NOTIFY); //data characteristic
     
     pCmdService = pServer->createService(CMD_SERVICE_UUID); //create control + battery service
     
@@ -405,6 +450,10 @@ void setup() {
     pServer->setCallbacks(new ServerCallbacks);
     pImgControl->setCallbacks(new ImgControlCallbacks);
     pCmdChar->setCallbacks(new CmdCallbacks);
+
+    NimBLEDevice::setSecurityAuth(true, false, false);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    // NimBLEDevice::setSecurityPasskey(BLE_PASSKEY);
 
     pServer->start();
 
@@ -501,7 +550,7 @@ void loop(){
             break;
         }
         
-        case(SEND):{
+        case(SEND) : {
 
             if( requested_image_index - 1 < latest_index && data_request ){ //delete previous image: if next is already requesting => there was no error
                 Serial.println("Deleting previous");
@@ -552,7 +601,7 @@ void loop(){
             }
             if ( !client_connected ||  ( micros() - sendStartTime > toMicros(REQUEST_TIMEOUT) )  ){
                 img_state = WAIT_FOR_CONNECTION;
-                sendError(0, 5); //"yo something timed out!"
+                sendError(latest_index, 5); //"yo something timed out!"
             }
             break;
 
